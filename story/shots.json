@@ -1,0 +1,97 @@
+{
+  "style": "Cinematic Chinese period drama, 35mm film, moody chiaroscuro lighting, deep crimson and gold palette, incense smoke, shallow depth of field, photorealistic, dramatic, highly detailed",
+  "negative": "low quality, worst quality, blurry, oversaturated, distorted face, deformed hands, extra fingers, modern clothing, cartoon, anime, 3d render, text, watermark, subtitles, jitter, flicker",
+  "width": 480,
+  "height": 832,
+  "num_frames": 65,
+  "steps": 4,
+  "guide": 1.0,
+  "scheduler": "distill4",
+  "fps": 16,
+  "shots": [
+    {
+      "id": "01_hairpin",
+      "title": "雨夜·金钗",
+      "prompt": "A ragged young woman kneels in the rain in a narrow ancient Chinese alley at night, a palace maid's weathered hand offers her a gleaming gold hairpin with red tassels, extreme close-up on the hairpin reflecting warm lantern light, rain streaks, wet stone, dramatic shadows",
+      "vo": "他们说，我这张脸，值一根金钗。",
+      "sub": "他们说，我这张脸，值一根金钗"
+    },
+    {
+      "id": "02_mirror",
+      "title": "铜镜·上妆",
+      "prompt": "Close-up of a beautiful young Chinese bride with pale porcelain skin and red lips, a heavy gold hairpin with red tassels in her elaborate black updo, a translucent red silk veil being lowered over her face, reflection in an antique bronze mirror, candlelight, her eyes sharp and defiant",
+      "vo": "从今夜起，我叫魏娆。",
+      "sub": "从今夜起，我叫魏娆"
+    },
+    {
+      "id": "03_wedding_hall",
+      "title": "喜堂·独行",
+      "prompt": "A lone bride in layered red-and-gold Ming dynasty wedding robes walks slowly through a vast ancient Chinese manor hall lined with red candles and bowing servants, a long red train dragging on dark stone floor, symmetrical composition, dust motes in shafts of light, ominous atmosphere",
+      "vo": "一顶花轿，替一个素未谋面的男人冲喜。",
+      "sub": "一顶花轿，替一个素未谋面的男人冲喜"
+    },
+    {
+      "id": "04_bridal_chamber",
+      "title": "新房·冲喜",
+      "prompt": "A pale handsome young Chinese nobleman lies unconscious on a carved rosewood bed in dark red and black robes, a bride in red wedding dress sits beside him and lifts her veil, candlelight flickering, red bed curtains, incense smoke drifting through the dark room",
+      "vo": "他们说他快死了。可他们没告诉我，他醒过来，会先看见我。",
+      "sub": "他们说他快死了"
+    },
+    {
+      "id": "05_corridor",
+      "title": "回廊·双生",
+      "prompt": "Two identical beautiful young Chinese women face each other in a dim manor corridor, one in red wedding robes with a gold hairpin, the other in black-and-gold embroidered robes with a cold smile, paper lanterns swaying between them, symmetrical framing, tension",
+      "vo": "你占了我的名字，我的夫君，我的人生。",
+      "sub": "你占了我的名字，我的夫君"
+    },
+    {
+      "id": "06_secret",
+      "title": "金钗·密信",
+      "prompt": "Extreme close-up of slender pale fingers twisting open a hollow gold hairpin, a tiny rolled paper secret letter emerging from inside, candlelight glinting on engraved phoenix patterns, red silk background, shallow depth of field",
+      "vo": "金钗是空的。里面藏着一封密信。",
+      "sub": "金钗是空的"
+    },
+    {
+      "id": "07_awake",
+      "title": "惊醒·扣腕",
+      "prompt": "A pale male hand seizes a young bride's wrist above a carved bed, her face in profile lit by candlelight, gold hairpin, red bed curtains, the nobleman's face half-hidden in shadow, dramatic side lighting, shallow depth of field, cinematic Chinese period drama",
+      "vo": "你是谁？……你的妻。",
+      "sub": "你是谁？"
+    },
+    {
+      "id": "08_poison_tea",
+      "title": "毒茶·堂上",
+      "prompt": "Close-up of a porcelain teacup of amber tea offered by a wrinkled hand in dark gold sleeves, steam rising, a red bridal sleeve in the foreground, ornate ancestral hall blurred in candlelight, incense smoke, ominous suspense, shallow depth of field",
+      "vo": "这杯茶，敬国公府的新妇。",
+      "sub": "这杯茶，敬新妇"
+    },
+    {
+      "id": "09_candle_out",
+      "title": "吹灯·黑影",
+      "prompt": "A figure in black-and-gold robes blows out a candle in a dark corridor, a silver knife glints in the darkness, red lanterns swinging in the wind, deep shadows, suspense",
+      "vo": "灯灭之后，死一个替身，谁会知道？",
+      "sub": "灯灭之后"
+    },
+    {
+      "id": "10_shield",
+      "title": "挡剑·血染",
+      "prompt": "Extreme close-up of a silver blade slicing through red silk, small blood droplets blooming on crimson fabric, a pale hand and a red bridal sleeve in frame, candlelight, gold embroidery, shallow depth of field, tragic and beautiful, cinematic Chinese period drama",
+      "vo": "替身也会疼。可替身，也会选。",
+      "sub": "替身也会选"
+    },
+    {
+      "id": "11_sword",
+      "title": "拔剑·反杀",
+      "prompt": "The young nobleman rises from the bed and draws a sword, blood spattering across a painted folding screen, guards rushing in with lanterns, dynamic low angle, dramatic shadows, ancient Chinese manor",
+      "vo": "动我的人，一个都别想活。",
+      "sub": "一个都别想活"
+    },
+    {
+      "id": "12_snow",
+      "title": "雪庭·分钗",
+      "prompt": "A man and a woman stand side by side in a snowy ancient Chinese courtyard at dawn, she in red, he in black, each holding half of a broken gold hairpin, snow falling, wide cinematic shot from behind, misty rooftops, quiet and epic",
+      "vo": "一钗两命。从今往后，谁是替身，谁是主子——",
+      "sub": "一钗两命"
+    }
+  ]
+}

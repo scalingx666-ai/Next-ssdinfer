@@ -1,0 +1,40 @@
+# ---- build artifacts ----
+*.o
+*.d
+*.a
+h3
+h3_*_tests
+h3_*_test
+libh3.a
+.deps/
+build/
+
+# ---- models & weights (multi-GB, never commit) ----
+models/
+*.safetensors
+*.bin
+*.gguf
+
+# ---- generated media ----
+*.mp4
+*.wav
+*.png
+*.jpg
+!docs/**/*.png
+!docs/**/*.jpg
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- os / editor ----
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ---- logs ----
+*.log
+nohup.out
