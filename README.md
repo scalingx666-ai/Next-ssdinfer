@@ -37,14 +37,62 @@ export H3_MODEL=/path/to/MiniMax-H3/snapshots/master
 
 # 3. 跑单镜样板验证画质
 cd ../pipeline
-python3 h3_batch.py --script ../shots/h3_shots_b37.jsonl \
+python3 render.py --script ../shots/h3_shots_b37.jsonl \
     --preset max --out-dir outputs/probe --only 01_hairpin
 
 # 4. 质检
 python3 qc_shot.py outputs/probe/01_hairpin_37f.mp4
 ```
 
-引擎必须从其所在目录运行（`h3_gpu.m` 从当前工作目录解析 `h3_shaders.metal`），`h3_batch.py` 已自动处理 `cwd`。
+引擎必须从其所在目录运行（`h3_gpu.m` 从当前工作目录解析 `h3_shaders.metal`），`render.py` 已自动处理 `cwd`。
+
+先看配置是否可行，不必启动渲染：
+
+```bash
+# 只报告 capacity，不渲染（默认 preset 是 smoke，最便宜的档）
+python3 render.py --script ../shots/h3_shots_b37.jsonl --check-only
+
+# 打印将要下发的命令流
+python3 render.py --script ../shots/h3_shots_b37.jsonl --dry-run
+```
+
+```bash
+$ python3 render.py --script ../shots/h3_shots_b37.jsonl --preset max --check-only
+capacity: 4480/4480 tokens (100% of the measured budget) — within 10% of the measured budget
+```
+
+预设阶梯与各自的 token 占用：
+
+| preset | 画布 / 帧数 | tokens | 说明 |
+|---|---|---:|---|
+| `smoke` | 256×448 / 22f | 672 | 最便宜的端到端验证 |
+| `max` | 512×896 / 37f | 4480 | **生产配置** |
+| `max30` | 512×896 / 37f | 4480 | 同 `max` 但 30 步（A/B 用） |
+| `mid` | 384×672 / 61f | 4032 | 时长优先 |
+| `target` | 256×448 / 120f | 3360 | 旧低质档（保留作对比） |
+| `steps20_same` | 256×448 / 120f | 3360 | 同画布换 20 步 |
+
+### 为什么 CapacityModel 是一等对象
+
+因为真实上限不是你以为的那个。在 M1 Pro 上它不是显存：
+
+> 超预算的任务**照样 rc=0 退出，并写出一个能播放的 16px 马赛克 mp4**。
+
+所以"检查是否跑完"毫无意义，必须"检查是否可能跑成"。`CapacityModel` 把请求形状换算成 token 数，对照实测预算给出**拒绝理由**，而不是静默降级：
+
+```bash
+$ python3 render.py --preset max --only 02_mirror --check-only   # 该镜 frames=72
+capacity: 02_mirror: 8064 tokens exceeds the 4480 budget measured on this
+hardware. The renderer would still exit rc=0 and write a 16px-mosaic clip,
+so this is refused rather than degraded. Reduce frames to 37 or drop to a
+smaller canvas.
+```
+
+跑测试（命令流 golden + capacity 锚点）：
+
+```bash
+cd pipeline && python3 -m unittest discover -s tests -v
+```
 
 ---
 
@@ -56,11 +104,20 @@ engine/          打过补丁的 h3.c 源码（47 个文件，1.6 MB）
   h3_gpu.m          Metal/MPSGraph 后端，含注意力实现
   h3_shaders.metal  着色器
   tests/            上游测试（make test）
-pipeline/        批量生成与合成
-  h3_batch.py       把 JSONL 镜头脚本喂给 h3 管道模式
-  qc_shot.py        单镜质检（区分马赛克/暗糊/正常）
-  make_h3_shots.py  从故事稿生成镜头脚本
-  assemble_*.py     成片合成
+pipeline/
+  render.py         CLI 入口：参数解析 + resume + 会话（薄封装）
+  core/             引擎无关机制，不含任何模型阈值
+    shots.py          Shot 记录与脚本加载
+    session.py        命令流拼装、渲染器子进程、产物回映射
+    resume.py         崩溃后的幂等重入
+    qc.py             ffprobe 探测与帧统计（只测数，不下判语）
+    adapter.py        EngineAdapter / CapacityModel / Preset 协议
+  models/
+    h3/               H3 专属知识：token 算术、preset 阶梯、QC 阈值
+  tests/             命令流 golden 测试与 capacity 锚点
+  qc_shot.py         单镜质检（区分马赛克/暗糊/正常）
+  make_h3_shots.py   从故事稿生成镜头脚本
+  assemble_*.py      成片合成
 shots/           已验证的镜头脚本（b37 = 生产配置）
 story/            《嫁金钗》12 镜故事稿与字幕
 docs/
@@ -70,6 +127,79 @@ docs/
 ```
 
 权重（约 134 GB）、模型缓存、生成的视频**刻意不入库**，见 `.gitignore`。
+
+---
+
+## 框架结构：机制与知识分离
+
+这个流水线被刻意切成两层，理由是**本仓库最值钱的资产是一组实测数字，把它们稀释成通用框架里的脚注是负优化**。
+
+```
+core/                           models/h3/
+─────────────────────────       ─────────────────────────────
+Shot                            TOKEN_BUDGET = 4480
+Session / resume                PRESETS（smoke/max/max30/mid/...）
+命令流拼装与回映射              H3Capacity：token 算术
+帧统计（probe、std、block16）    QC_BLOCK16_MOSAIC = 0.105
+EngineAdapter 协议              命令语法、!cache 语义
+```
+
+**`core/` 里没有任何模型阈值。** 它回答的是"对任何本地生成器都成立"的问题：一个请求长什么样、怎么把一条命令流喂给长驻进程、崩溃后如何不重做、以及怎么量一帧的统计量。
+
+**`models/<name>/` 里没有任何通用机制。** 它回答的是"只有这个模型知道"的问题：这台硬件的 token 预算是多少、什么统计量组合意味着 latent 没去噪、预设阶梯怎么排。
+
+### 为什么 CapacityModel 是一等对象
+
+因为真实上限不是你以为的那个。在 M1 Pro 上它不是显存：
+
+> 超预算的任务**照样 rc=0 退出，并写出一个能播放的 16px 马赛克 mp4**。
+
+所以"检查是否跑完"毫无意义，必须"检查是否可能跑成"。`CapacityModel` 把请求形状换算成 token 数，对照实测预算给出**拒绝理由**，而不是静默降级：
+
+```bash
+$ python3 render.py --preset max --only 01_hairpin --check-only
+capacity: 4480/4480 tokens (100% of the measured budget) — within 10% of the measured budget
+```
+
+```bash
+$ python3 render.py --preset max --only 02_mirror --check-only   # 该镜 frames=72
+capacity: 02_mirror: 8064 tokens exceeds the 4480 budget measured on this
+hardware. The renderer would still exit rc=0 and write a 16px-mosaic clip,
+so this is refused rather than degraded. Reduce frames to 37 or drop to a
+smaller canvas.
+```
+
+### 命令流为什么必须逐字节稳定
+
+批量驱动不是"每镜起一个进程"。长驻渲染器把权重和 conditioning 留在内存里，所以驱动下发**一条命令流**，渲染器按序执行。这带来一个必须守住的约束：
+
+> **逐镜覆盖如果不复位，会泄漏到后面每一镜。**
+
+它不报错，只是让后续镜头的形状悄悄变化——缓存失效、成本模型失真，而你在画面上要等到第 5 镜才看出来。因此每个覆盖都配一个复位（`tests/test_h3_stream.py` 对此有 golden 断言）。
+
+同理，`!frames` 必须显式下发：h3 默认 56 帧，漏掉这一行的镜头会安静地变成另一个形状。
+
+### 扩展到新模型
+
+新增一个 adapter，不改 `core/`：
+
+```python
+# pipeline/models/<name>/__init__.py
+class MyAdapter:
+    name = "<name>"
+    presets = {...}                 # Preset 阶梯
+    capacity = MyCapacity()         # 实测预算，不是 datasheet 数字
+
+    def header(self, preset, out_dir): ...      # 全局设置行
+    def shot_lines(self, shot, i, preset): ...  # 单镜，覆盖要复位
+    def footer(self): ...                       # 结束会话
+    def is_complete(self, path, shot): ...      # 只有模型层知道"完整"的含义
+    def judge(self, path, shot): ...            # 对照自己校准过的阈值
+```
+
+然后在 `models/registry.py` 的 `load()` 里加一个分支。`core/` 不需要动——它从头到尾不知道 H3 的存在。
+
+`capacity` 的数字必须是**实测**的。datasheet 上的显存、上下文长度、推荐批量，在这个问题上全部误导过人；这个仓库的核心结论就是"标称能力与本地可用能力不是一回事"。
 
 ---
 

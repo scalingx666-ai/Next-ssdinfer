@@ -38,3 +38,6 @@ venv/
 # ---- logs ----
 *.log
 nohup.out
+
+# ---- refactor scratch (retired; see pipeline/tests/test_h3_stream.py) ----
+_baseline_h3_batch.py

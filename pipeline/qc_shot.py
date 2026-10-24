@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Quality-control check for H3 clips.
 
-Extracts frames, prints image statistics that separate real content from the
-two failure modes we have actually observed on this machine, and optionally
-writes a side-by-side strip.
+Extracts frames and prints statistics that separate real content from the two
+failure modes actually observed on this machine, then applies the calibrated
+verdict.
 
-Failure modes this is meant to catch (see h3c/PERFORMANCE.md section 9):
-  * token-count blowup  -> latent stays noise -> 16px mosaic, adjdiff high,
-    low-frequency share collapses.
-  * under-denoised      -> dark mush, mean/std low, no subject.
+This is now a thin CLI over ``models/h3``: the statistics live in
+``core/qc.py`` and the thresholds in ``models/h3/__init__.py``. Keeping a
+second copy of either would let the two drift apart, and a QC threshold that
+disagrees with the one used during a batch run is worse than no QC at all.
 
 Usage:
-    python qc_shot.py outputs/h3_probe/p512_22f.mp4 [more.mp4 ...]
+    python qc_shot.py outputs/h3_probe/p512_37f.mp4 [more.mp4 ...]
     python qc_shot.py --strip out.png a.mp4 b.mp4 c.mp4
+
+Note: needs numpy and Pillow, so it runs under ``../ai-drama/.venv`` rather
+than the bare system Python.
 """
 
 from __future__ import annotations
@@ -20,11 +23,13 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from models.h3 import load_adapter  # noqa: E402
 
 
 def probe(path: Path) -> str:
@@ -36,57 +41,14 @@ def probe(path: Path) -> str:
     return out
 
 
-def grab(path: Path, at: float) -> np.ndarray:
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-ss", f"{at}", "-i", str(path),
-         "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
-        capture_output=True).stdout
-    if not raw:
-        raise SystemExit(f"cannot decode a frame from {path}")
-    return np.asarray(Image.open(__import__("io").BytesIO(raw)).convert("L"),
-                      dtype=np.float32) / 255.0
-
-
-def stats(a: np.ndarray) -> dict:
-    """Statistics that distinguish content from noise.
-
-    adjdiff alone is misleading: isolated grain spikes inflate it while a
-    mosaic of 16px blocks keeps it low-ish, because the blocks are internally
-    smooth. So we also measure the block-scale jump, which is what a latent
-    that never denoised actually looks like after the 16x VAE decode.
-    """
-    horizontal = np.abs(np.diff(a, axis=1)).mean()
-    vertical = np.abs(np.diff(a, axis=0)).mean()
-    block = np.abs(a[16:, 16:] - a[:-16, :-16]).mean()
-    return {
-        "mean": float(a.mean()),
-        "std": float(a.std()),
-        "adjdiff": float((horizontal + vertical) / 2),
-        "block16": float(block),
-        "block_ratio": float(block / max((horizontal + vertical) / 2, 1e-6)),
-    }
-
-
-def verdict(s: dict) -> str:
-    """Verdict from *absolute* block16, not block_ratio.
-
-    Recalibrated on 2026-10-24 against native-resolution (768x1344) clips:
-        512x896/22f  good    block16 0.0689  std 0.175  block_ratio 4.85
-        512x896/37f  good    block16 0.0783  std 0.171  block_ratio 7.66
-        512x896/72f  mosaic  block16 0.1226  std 0.114  block_ratio 7.26
-    block_ratio is NOT a discriminator: the 37f good clip scores higher than
-    the 72f mosaic clip, because a *noisy* mosaic block lattice raises adjdiff
-    at the same time as block16. Only the absolute 16px-offset difference plus
-    a collapsed std separates them, so both conditions are required.
-    Thresholds below apply to clips of >=1200px on the short side.
-    """
-    if s["block16"] > 0.105 and s["std"] < 0.14:
-        return "MOSAIC (latent never denoised)"
-    if s["std"] < 0.09:
-        return "MUSH (under-denoised / no subject)"
-    if s["mean"] < 0.12:
-        return "DARK (subject likely missing)"
-    return "OK"
+def duration_of(path: Path) -> float:
+    try:
+        return float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True).stdout.strip())
+    except ValueError:
+        return 0.0
 
 
 def main() -> int:
@@ -98,40 +60,49 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=896)
     args = ap.parse_args()
 
-    frames = []
+    adapter = load_adapter()
+
     for name in args.clips:
         path = Path(name)
         if not path.exists():
             print(f"{path}: MISSING")
             continue
         meta = probe(path)
-        duration = 0.0
-        try:
-            duration = float(subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", str(path)],
-                capture_output=True, text=True).stdout.strip())
-        except ValueError:
-            pass
-        at = args.at if args.at is not None else max(duration * 0.5, 0.05)
-        a = grab(path, at)
-        s = stats(a)
+        at = args.at if args.at is not None else max(duration_of(path) * 0.5,
+                                                     0.05)
+        verdict = adapter.judge(path)
+        s = verdict.stats
         print(f"{path.name}  [{meta}]  sampled at {at:.2f}s")
         print(f"   mean={s['mean']:.3f} std={s['std']:.3f} "
               f"adjdiff={s['adjdiff']:.4f} block16={s['block16']:.4f} "
-              f"block_ratio={s['block_ratio']:.2f}")
-        print(f"   verdict: {verdict(s)}")
-        frames.append((path.stem, a))
+              f"block_ratio={s['block16_ratio']:.2f}")
+        print(f"   verdict: {verdict.label}"
+              + (f" — {verdict.detail}" if verdict.detail else ""))
 
-    if args.strip and frames:
-        tiles = []
-        for _, a in frames:
-            im = Image.fromarray((a * 255).astype(np.uint8))
-            w = max(1, int(im.width * args.height / im.height))
-            tiles.append(np.asarray(im.resize((w, args.height))))
-        Image.fromarray(np.hstack(tiles)).save(args.strip)
-        print(f"strip -> {args.strip}")
+    if args.strip:
+        write_strip(args.clips, args.strip, args.height)
     return 0
+
+
+def write_strip(clips, out_path: str, height: int) -> None:
+    """Side-by-side strip of one frame from each clip."""
+    import numpy as np
+    from PIL import Image
+
+    from core.qc import grab_frame
+
+    tiles = []
+    for name in clips:
+        path = Path(name)
+        if not path.exists():
+            continue
+        a = grab_frame(path, max(duration_of(path) * 0.5, 0.05))
+        im = Image.fromarray((a * 255).astype(np.uint8))
+        w = max(1, int(im.width * height / im.height))
+        tiles.append(np.asarray(im.resize((w, height))))
+    if tiles:
+        Image.fromarray(np.hstack(tiles)).save(out_path)
+        print(f"strip -> {out_path}")
 
 
 if __name__ == "__main__":
