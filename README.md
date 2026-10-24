@@ -273,6 +273,26 @@ token-reduction off    ssd-streaming on
 
 ---
 
+## 附带评估：本机能跑哪个本地 LLM
+
+同一台机器上顺带核实了四个候选模型，结论只有 Flint 可行：
+
+| 模型 | 权重体积 | 32 GB 可行性 |
+|---|---|---|
+| **Recursive Flint**（40B-A2.5B） | 17.8 GB（3-bit） | ✅ 可行 |
+| Edge0（35B MoE） | ~17 GB | ⚠️ 需额外运行时 |
+| MiniMax M3.1 Flash（428B） | ~150–215 GB | ❌ 差 4 倍 |
+| DeepSeek V4.1 Flash 1017（552B） | ~510 GB | ❌ 差 16 倍 |
+
+坑点：Flint 官方引擎 `rec` **明确要求 M4 Pro / M5 Pro / M5 Max + 48GB**，`install.sh` 会跑
+`rec doctor` 直接拒绝本机。但 Flint 架构已被 llama.cpp（[PR #30928](https://github.com/ggml-org/llama.cpp/pull/30928)）
+和 mlx-vlm ≥ 0.7.10 原生支持，社区版 3-bit 量化就是为 24/32GB Mac 做的。
+
+注意 GPU 的可用显存不是 32GB，而是 macOS 默认工作集上限
+**≈ 21.3 GB**（`max_recommended_working_set_size`）。详见 [docs/LOCAL-LLM-EVALUATION.md](docs/LOCAL-LLM-EVALUATION.md)。
+
+---
+
 ## 已知限制与未验证项
 
 诚实列出，避免误用：
