@@ -4,7 +4,8 @@
 > DeepSeek V4.1 Flash 1017 和 MiniMax M3.1 Flash 差 4–16 倍内存，不是"优化一下"能弥补的数量级差距。
 > Edge0 的 SSD 流式思想与本仓库同构，但它的 35B 模型同样需要显存承载。
 
-本文记录 2026-10-24 对四个候选模型的核实过程与结论，避免以后重复调研。
+本文记录 2026-10-24/25 对四个候选模型的核实过程与结论，以及把跑通的 Flint
+做成 OpenAI 兼容服务的实测记录，避免以后重复调研。
 
 ---
 
@@ -192,6 +193,79 @@ cd pipeline
 python3 render.py --script ../shots/flint_smoke.jsonl --model flint \
   --preset plan --out-dir ../ai-drama/outputs/flint_plans --qc
 ```
+
+---
+
+## OpenAI 兼容服务：给 api key、url、模型名就能被调用
+
+CLI 跑通之后，下一步是让它变成一个服务。`mlx-vlm` 自带 `mlx_vlm.server`，
+直接暴露 `/v1/models` 与 `/v1/chat/completions`——不用再自己写一层 HTTP。
+
+### 启动
+
+框架入口只决定"监听在哪、要不要 key"，argv 由 adapter 提供（哪个二进制、
+哪份权重、自称什么 id 属于模型知识）：
+
+```bash
+cd pipeline
+python3 serve.py --model flint              # 默认 127.0.0.1:8080
+python3 serve.py --model flint --dry-run    # 只看会下发什么
+```
+
+两个默认是有意写死的：
+
+- **只绑 `127.0.0.1`**。本地模型服务监听 `0.0.0.0`，等于把一台无人监管的 LLM
+  挂到笔记本加入的每一个网络上。
+- **key 永不为空**。不传 `--api-key` 就生成一把并打印一次（想固定就设
+  `FLINT_API_KEY`）。空 key 会静默降级成无鉴权，而"没看到提示"不会被任何人读成决定。
+
+它用 `os.execv` 而不是 `subprocess`：Ctrl-C 与退出码归属于服务端本身，
+套一层会吞掉信号的壳只会让卡在加载阶段的进程杀不掉。
+
+`ai-drama/serve_flint.sh` 是等价的持久启动脚本（key 存 `.flint_api_key`，chmod 600，不入库）：
+
+```bash
+cd ai-drama && ./serve_flint.sh
+```
+
+### 客户端三元组
+
+| 项 | 值 |
+|---|---|
+| `base_url` | `http://127.0.0.1:8080/v1` |
+| `api_key` | 启动横幅打印的那把 / `.flint_api_key` |
+| `model` | **权重绝对路径**（`/v1/models` 原样返回的 id），**无短别名** |
+
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://127.0.0.1:8080/v1",
+           api_key=open(".../ai-drama/.flint_api_key").read())
+r = c.chat.completions.create(
+    model="/Users/max/codebase/rsi/ai-drama/models/flint-mixed-3-4bit",
+    messages=[{"role": "user", "content": "..."}],
+    max_tokens=1536, temperature=1.0, top_p=0.95)
+print(r.choices[0].message.content, r.choices[0].finish_reason)
+```
+
+### 服务端比 CLI 多出来的三条（实测，不是读 `--help` 得来的）
+
+1. **思考块单独分离**。服务端把 `<think>…</think>` 放进 `reasoning_content`，
+   `content` 是干净正文——CLI 模式必须自己剥。这一条上服务端严格更好。
+2. **`max_tokens` 把思考也计入**。预算 300 实测得到 `content: None` +
+   `finish_reason: length`；1536 才能稳定出正文。客户端必须知道给足。
+3. **鉴权是真的**：错误 key 与缺 key 都是 401，本机实测。
+
+服务端 decode **50.7 tok/s**（CLI 47.7），峰值内存 `timings.peak_memory`
+17.9157 GB，与 CLI 的 17.953 GB 一致。流式 `stream=True` 可用，
+`finish_reason` 与 `usage` 计数精确，客户端能真正校验完成。
+
+### 两个必踩的坑
+
+- **`model` 必须是长绝对路径**。写 `"flint"` 之类别名会 400——服务端把未知名字
+  当 Hugging Face repo id 去下载。这是服务端行为，仓库内不可控，照抄 `/v1/models`
+  的 id 即可。
+- **一个服务实例占 17.9 GB**。服务运行期间不可再起第二个模型进程：
+  两个就是 35.8 GB，超过 21.33 GiB 工作集，直接 OOM。
 
 ---
 

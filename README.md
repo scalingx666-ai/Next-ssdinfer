@@ -106,23 +106,27 @@ engine/          打过补丁的 h3.c 源码（47 个文件，1.6 MB）
   tests/            上游测试（make test）
 pipeline/
   render.py         CLI 入口：参数解析 + resume + 会话（薄封装）
+  serve.py          CLI 入口：把 adapter 起成 OpenAI 兼容服务（监听 + 鉴权）
   core/             引擎无关机制，不含任何模型阈值
     shots.py          Shot 记录与脚本加载
     session.py        命令流拼装、渲染器子进程、产物回映射
     resume.py         崩溃后的幂等重入
     qc.py             ffprobe 探测与帧统计（只测数，不下判语）
     adapter.py        EngineAdapter / CapacityModel / Preset 协议
+    hardware.py       GPU 工作集上限探测（两个 adapter 共享的同一堵墙）
   models/
     h3/               H3 专属知识：token 算术、preset 阶梯、QC 阈值
+    flint/            Flint 专属知识：思考块剥离、字节容量、serve_argv
   tests/             命令流 golden 测试与 capacity 锚点
   qc_shot.py         单镜质检（区分马赛克/暗糊/正常）
   make_h3_shots.py   从故事稿生成镜头脚本
   assemble_*.py      成片合成
-shots/           已验证的镜头脚本（b37 = 生产配置）
+shots/           已验证的镜头脚本（b37 = 生产配置，flint_smoke = 文本路径冒烟）
 story/            《嫁金钗》12 镜故事稿与字幕
 docs/
   PERFORMANCE.md       性能与画质上限实验记录（核心）
   ENGINEERING.md       工程总纲、M1 Pro 补丁说明
+  LOCAL-LLM-EVALUATION.md  本机 LLM 选型、Flint 实测与 OpenAI 兼容服务
   UPSTREAM-H3-METAL.md antirez 上游 README 原文
 ```
 
@@ -305,6 +309,36 @@ python3 render.py --script ../shots/flint_smoke.jsonl --model flint \
 另一个必踩的坑：Flint **关不掉思考**（`--thinking-mode disabled` 无效），
 `max_tokens` 给小了会产出纯思考、正文为空、返回码 0 的文件。
 详见 [docs/LOCAL-LLM-EVALUATION.md](docs/LOCAL-LLM-EVALUATION.md)。
+
+### 作为 OpenAI 兼容服务调用
+
+它也能直接当本地 API 端点用（`mlx_vlm.server`，已在本机实测）：
+
+```bash
+cd pipeline
+python3 serve.py --model flint            # 默认 127.0.0.1:8080，key 缺失则生成并打印
+```
+
+客户端三元组：
+
+| 项 | 值 |
+|---|---|
+| `base_url` | `http://127.0.0.1:8080/v1` |
+| `api_key` | 启动横幅打印的那把（或 `FLINT_API_KEY`） |
+| `model` | `/v1/models` 返回的**权重绝对路径**，无短别名 |
+
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="sk-...")
+r = c.chat.completions.create(model="<上面的绝对路径>",
+                              messages=[{"role": "user", "content": "你好"}],
+                              max_tokens=1536)
+```
+
+三条实测差异：思考块被服务端单独放进 `reasoning_content`，`content` 是干净正文；
+`max_tokens` **把思考也计入**（给 300 只得到 `content: null` + `finish_reason: length`，
+1536 起步）；`model` 写短名会 400（服务端会把未知名字当 HF repo 去下载）。
+服务端 decode 50.7 tok/s、峰值 17.92 GB——所以**服务运行期间不能再起第二个模型进程**。
 
 ---
 

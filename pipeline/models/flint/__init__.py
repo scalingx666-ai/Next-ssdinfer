@@ -308,6 +308,44 @@ class FlintAdapter:
     def footer(self) -> list[str]:
         return []
 
+    # -- serving ----------------------------------------------------------
+
+    def serve_argv(self, host: str = "127.0.0.1", port: int = 8080,
+                   api_key: str = "", extra: list[str] | None = None
+                   ) -> list[str]:
+        """Full argv for the OpenAI-compatible server.
+
+        The server is ``mlx_vlm.server``, which ships with mlx-vlm and exposes
+        ``/v1/models`` and ``/v1/chat/completions``. Three behaviours were
+        established by calling it, not by reading it:
+
+        * The model id clients must pass is the *path* this adapter resolved
+          (``/v1/models`` reports it verbatim). An unknown name is treated as
+          a Hugging Face repo id and fails with 400 while the server tries to
+          download it — so there is no "flint" alias, the id is long.
+        * The reasoning block arrives separately as ``reasoning_content`` and
+          ``content`` is clean text. The CLI could not do this; server mode is
+          strictly better. ``max_tokens`` still counts the reasoning, so a
+          small budget yields ``content: null`` and ``finish_reason: length``.
+        * ``--api-key`` is enforced: a missing or wrong bearer is rejected
+          with 401, verified on this machine.
+
+        ``host`` defaults to loopback deliberately. A local model server has
+        no reason to listen on every interface, and 0.0.0.0 would put an
+        unauthenticated-by-default LLM on the LAN.
+        """
+        if missing := self.runtime_ready():
+            raise RuntimeError(f"flint runtime is not ready: {missing}")
+        return [
+            str(self.binary), "-m", "mlx_vlm.server",
+            "--host", host,
+            "--port", str(port),
+            "--model", str(self.model_dir),
+            *(["--api-key", api_key] if api_key else []),
+            "--log-level", "INFO",
+            *(extra or []),
+        ]
+
     # -- output validation ------------------------------------------------
 
     @staticmethod

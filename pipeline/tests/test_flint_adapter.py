@@ -190,6 +190,43 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(verdict.label, "OK")
 
 
+class ServeTest(unittest.TestCase):
+    """The OpenAI-compatible server argv, against a real running server.
+
+    Every assertion here was established by calling the server, not by reading
+    ``--help``: the model id is the resolved path (there is no short alias --
+    an unknown name makes the server try to download it), and the bearer is
+    enforced with 401.
+    """
+
+    def setUp(self):
+        self.adapter = FlintAdapter(PIPELINE.parent)
+
+    def test_defaults_to_loopback(self):
+        argv = self.adapter.serve_argv()
+        self.assertEqual(argv[argv.index("--host") + 1], "127.0.0.1")
+
+    def test_model_id_is_the_resolved_path(self):
+        # /v1/models reports this verbatim, and clients must send it back.
+        argv = self.adapter.serve_argv()
+        self.assertEqual(argv[argv.index("--model") + 1],
+                         str(self.adapter.model_dir))
+        self.assertTrue(Path(argv[argv.index("--model") + 1]).is_absolute())
+
+    def test_api_key_is_passed_when_given(self):
+        argv = self.adapter.serve_argv(api_key="sk-test")
+        self.assertEqual(argv[argv.index("--api-key") + 1], "sk-test")
+
+    def test_api_key_flag_omitted_when_empty(self):
+        # serve.py never calls this with an empty key -- it generates one --
+        # but the adapter must not emit a bare `--api-key` and crash.
+        self.assertNotIn("--api-key", self.adapter.serve_argv(api_key=""))
+
+    def test_uses_the_server_module_not_a_wrapper(self):
+        argv = self.adapter.serve_argv()
+        self.assertEqual(argv[1:3], ["-m", "mlx_vlm.server"])
+
+
 class CapacityTest(unittest.TestCase):
     """Byte accounting, against the probed ceiling."""
 
