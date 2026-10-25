@@ -225,8 +225,15 @@ python3 serve.py --model flint --dry-run    # 只看会下发什么
 `ai-drama/serve_flint.sh` 是等价的持久启动脚本（key 存 `.flint_api_key`，chmod 600，不入库）：
 
 ```bash
-cd ai-drama && ./serve_flint.sh
+cd ai-drama
+./serve_flint.sh start      # 后台启动（默认动作），就绪后打印客户端三元组
+./serve_flint.sh status     # 是否在跑 + 三元组
+./serve_flint.sh stop
+./serve_flint.sh fg         # 前台运行，盯日志用
 ```
+
+它的子进程被 launchd 收养（PPID 1），关掉终端不会带走服务；`start` 是幂等的，
+已在运行时不会再起第二个（第二个会撞破 21.33 GiB 工作集）。
 
 ### 客户端三元组
 

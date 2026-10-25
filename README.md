@@ -319,6 +319,8 @@ cd pipeline
 python3 serve.py --model flint            # 默认 127.0.0.1:8080，key 缺失则生成并打印
 ```
 
+日常用着更方便的是 `ai-drama/serve_flint.sh start|stop|status`（后台启动、脱离终端的持久脚本）。
+
 客户端三元组：
 
 | 项 | 值 |
