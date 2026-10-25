@@ -95,19 +95,103 @@ doctor=$("$tmp/$artifact" doctor 2>&1) || { ...; fail 'this Mac does not meet th
 社区版 [`mlx-community/flint-mixed-3-4bit`](https://huggingface.co/mlx-community/flint-mixed-3-4bit)，
 标签明确写着 `24gb` / `32gb`：
 
-| | Recursive INT4 | 本方案 |
+| | Recursive INT4 | 本方案（社区 3-bit） |
 |---|---|---|
-| 磁盘体积 | 22.6 GB | **17.8 GB** |
+| 磁盘体积 | 22.6 GB | **16.61 GiB**（17,837,530,688 B，实测） |
 | 最小内存 | 48 GB（`rec`） | **24 GB** |
-| 峰值内存 | — | ≈ 19.5 GB |
+| 峰值内存 | — | **17.953 GB**（MLX 自报，实测） |
 | 6 项编码任务 | 6/6 | 6/6 |
 | 与 INT4 的 top-1 一致率 | — | 86.2% |
 
 量化方法：**只把 routed experts（占权重 95%）从 4bit 降到 3bit**，attention / embedding / 输出层
 保留 Recursive 训练过的值。perplexity 4.42，低于 INT4 的 4.62。
 
-> ⚠️ 作者注明：**未在真实 24GB Mac 上实测**，19.5GB 的拟合度来自 64GB Mac 上的峰值测量。
-> 本机 21.3GB 的 GPU 工作集上限装 19.5GB 是紧的，需关闭重应用。
+---
+
+## 本机实测结果（2026-10-25）
+
+**结论：Flint 在 M1 Pro / 32 GB 上跑得动，而且速度可用。**
+
+```
+Prompt: 11–83 tokens, 82.7–197 tok/s（prefill）
+Generation: 512 tokens, 47.737 tok/s
+Peak memory: 17.953 GB
+```
+
+| 指标 | 实测 | 预算 | 余量 |
+|---|---|---|---|
+| 峰值内存 | 17.953 GB（16.72 GiB） | 21.33 GiB 工作集 | **+4.6 GiB（79% 占用）** |
+| decode | 47.7 tok/s | — | — |
+| prefill | 82.7 tok/s（11 tok）/ 197 tok/s（83 tok） | — | — |
+| 单次请求墙钟 | ~27 s（含 16.6 GiB 权重加载 + 思考 + 作答） | — | — |
+
+三条被实测推翻的原先估计：
+
+1. **峰值不是 19.5 GB，是 17.95 GB。** 作者的 19.5 GB 是从 64 GB Mac 外推的，
+   而 MLX 惰性分页只把实际 touch 的专家读进内存——39.8B 里每 token 只激活 2.5B。
+2. **余量不是"紧的 1.8 GB"，是 4.6 GiB。** 不需要关浏览器。
+3. **官方 125 tok/s 与 76–119 tok/s 都不能当本机预期**；本机 decode 是 47.7 tok/s，
+   即 M4 Pro 的约 38%。这个数字只能实测，推不出来。
+
+### 容量模型：为什么装得下
+
+先前的"19.5 GB 装进 21.3 GB"是拍脑袋。实际的账可以算清楚：
+
+```
+峰值 = 权重 16.61 GiB
+     + KV 缓存（8-bit K/V，仅 14/49 层走全注意力，其余滑窗 513）
+     + 激活与 Metal scratch 预留 1.4 GiB
+```
+
+KV 随上下文增长极慢，这是长上下文能装下的关键：
+
+| 上下文 | KV | 峰值 | 结论 |
+|---|---|---|---|
+| 8,192 | 0.126 GiB | 18.14 GiB | ✅ 85% |
+| 32,768 | 0.455 GiB | 18.46 GiB | ✅ |
+| 131,072 | 1.767 GiB | 19.78 GiB | ✅ 93% |
+| 262,144（满） | 3.517 GiB | **21.53 GiB** | ❌ 超限，拒绝 |
+
+也就是说：**显存由权重决定，不由上下文决定**；满 262144 上下文反而装不下。
+这个账现在写在代码里（`pipeline/models/flint/FlintCapacity`），不是文档里的估算。
+
+### 一个必须知道的坑：Flint 关不掉思考
+
+`--thinking-mode disabled` 会被 CLI 接受，但**对本模型无效**——
+`chat_template.jinja` 在每一次 assistant 轮次无条件输出 `<think>`，不查任何开关。
+
+后果是实测到的：
+
+- `--max-tokens 512` 时，模型产出 1921 字节**纯思考**、正文一个字没有，**返回码 0**。
+- 所以"文件有内容"完全不能当作成功；必须剥掉思考块、再检查正文非空。
+
+这是文本模型版的"未去噪 latent"，已写进 `FlintAdapter.answer()` / `judge()`：
+未闭合的思考块返回空串，判定 `THINK_ONLY`。默认预算因此提到 1536 token。
+
+---
+
+## 接入框架（`pipeline/models/flint/`）
+
+Flint 是 `EngineAdapter` 的第二个实现，也是第一个非视频模型。它验证了抽象，
+但**不是直接套进去就成立**的——写第二个 adapter 才暴露了两处必须改的地方：
+
+| 改动 | 原因 |
+|---|---|
+| `Preset` 拆成 `Preset` + `MediaPreset` | 帧数/画布/层数是扩散模型专属；LLM 用 `max_tokens`/`temperature`。硬塞会让"通用接口"变成谎言 |
+| `judge` 改为可选（`Judge \| None`） | 原本以为文本失败一眼可见。实测证明不成立（见上），所以 Flint 反而实现了它；**可选是对的，预设理由错了** |
+| `Capacity` 的 `cost`/`budget` 带 `unit` | H3 花的是 DiT token，Flint 花的是字节。同一个"跑之前先算"的问题，不同量纲 |
+| `mode = "oneshot"` + `stdout_is_output` | `mlx_vlm.generate` 没有交互模式，每次请求一个完整 argv；正文走 stdout，所以输出文件名要在进程启动前定好 |
+
+两边的容量检查共享同一堵墙（`core/hardware.py` 探测的 21.33 GiB），
+但成本函数各自派生——H3 是实测的 4480 token 上限，Flint 是从 config 算出的字节数。
+
+跑法：
+
+```bash
+cd pipeline
+python3 render.py --script ../shots/flint_smoke.jsonl --model flint \
+  --preset plan --out-dir ../ai-drama/outputs/flint_plans --qc
+```
 
 ---
 
@@ -122,7 +206,8 @@ DiT token 总数（4480 上限），但它同样面对"装不下就流着读"—
 
 `pipeline/core/` 的 `EngineAdapter` 协议（`cwd` / `binary` / `extra_args` /
 `is_complete` / `judge`）正是为这种异构引擎留的扩展点。
-接入 Flint 作为 `models/flint/` adapter 是设计目标，不是改造。
+Flint 现在已经是 `pipeline/models/flint/` 的正式 adapter——**接入过程中改了四处协议**，
+见上面「接入框架」一节。抽象不是写完就成立的，是第二个实现逼出来的。
 
 ---
 
@@ -158,26 +243,42 @@ DiT token 总数（4480 上限），但它同样面对"装不下就流着读"—
 ### 4. 首次推理
 
 ```bash
-./.venv/bin/mlx_vlm.generate --model models/flint-mixed-3-4bit \
-  --temperature 1.0 --top-p 0.95 --top-k 20 \
-  --max-tokens 32768 \
-  --prompt "Write a Python function that merges overlapping intervals."
+./.venv/bin/python -m mlx_vlm.generate \
+  --model models/flint-mixed-3-4bit \
+  --prompt "Write a Python function that merges overlapping intervals." \
+  --max-tokens 512 --temperature 1.0 --top-p 0.95 --top-k 20 --verbose
 ```
 
-采样参数用 Recursive 的推荐值（temp 1.0 / top-p 0.95 / top-k 20），
-难题给足 32768 输出预算——Flint 会先思考 10–30K token 再作答。
+采样参数用 Recursive 的推荐值（temp 1.0 / top-p 0.95 / top-k 20）。
+`--verbose` 是唯一能拿到 MLX 内部 tok/s 与峰值内存的方式：
+
+```
+Prompt: 11 tokens, 54.365 tokens-per-sec
+Generation: 512 tokens, 47.737 tokens-per-sec
+Peak memory: 17.953 GB
+```
+
+注意 CLI 的几个真实参数名（猜错会直接报错）：没有 `--extra-eos-token`
+（是 `--eos-tokens`），`--verbose` 是开关对（关闭用 `--no-verbose` 而非
+`--verbose False`），`--output` 只对图像/视频生效、文本走 stdout。
 
 ---
 
 ## 已知风险
 
-1. **M1 Pro 无 Metal 4**：Flint 的 Metal megakernel 是否完全兼容未知，官方基准是 M4/M5。
-2. **官方 125 tok/s 不可直接预期**：那是 M4 Pro 的数。本机需实测。
-3. **19.5GB vs 21.3GB 工作集**：余量约 1.8GB，跑前关掉浏览器等重应用。
-4. **tool call 参数名错误**：mlx-vlm 0.7.10 已知问题，作者测得 OpenCode 测试中
+1. ~~M1 Pro 无 Metal 4 会不兼容~~ —— **已证伪**：跑通了，decode 47.7 tok/s。没有 megakernel 相关的报错。
+2. ~~官方 125 tok/s 不可直接预期~~ —— **已实测**：47.7 tok/s，约 M4 Pro 的 38%。
+3. ~~19.5GB vs 21.3GB，余量 1.8GB~~ —— **已实测**：17.95 GB，余 4.6 GiB，不必关重应用。
+4. **思考链吃预算**（仍然有效）：默认就要 1500 token 起步，`max_tokens` 给小了会
+   得到一份纯思考、正文为空、**返回码 0** 的输出。
+5. **满上下文装不下**：262144 上下文峰值 21.53 GiB，超过 21.33 GiB 工作集。
+   实用上限约 131K（19.78 GiB）。
+6. **tool call 参数名错误**：mlx-vlm 0.7.10 已知问题，作者测得 OpenCode 测试中
    85 次调用有 41 次参数名错误（如 `path` 而非 `filePath`），但任务最终仍全部通过。
-   修复在 [mlx-vlm#2571](https://github.com/Blaizzy/mlx-vlm/pull/2571)，发布后用 `--constrain-tool-calls`。
-5. **上下文控制在 32K 左右**：Flint 思考链很长，长上下文会挤占内存。
+   修复在 [mlx-vlm#2571](https://github.com/Blaizzy/mlx-vlm/pull/2571)。
+   **本仓库的 adapter 不做 tool call**，所以不受影响。
+7. **`required_sections` 只查存在性，不查结构**：实测有一例把五个标签挤在一行、
+   正文不分区，仍然通过。要更严需要按 shot 写正则，目前没做。
 
 ---
 

@@ -1,0 +1,2 @@
+{"id":"01_plan","prompt":"你是短剧分镜师。用一段中文写一个 3 秒镜头的分镜描述，必须严格按 Scene / Action / Camera / Look / Audio 五个部分组织，不要解释，不要编号。题材：雨夜古巷，一名女子跪在积水中，侍女递来一支鎏金红穗金钗。","out":"01_plan.txt","required_sections":["Scene","Action","Camera","Look","Audio"]}
+{"id":"02_plan","prompt":"你是短剧分镜师。用一段中文写一个 3 秒镜头的分镜描述，必须严格按 Scene / Action / Camera / Look / Audio 五个部分组织，不要解释，不要编号。题材：金钗在烛火下的极端特写，金属反光与红穗丝线的质感。","out":"02_plan.txt","required_sections":["Scene","Action","Camera","Look","Audio"]}

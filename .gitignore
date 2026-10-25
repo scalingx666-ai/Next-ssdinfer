@@ -2,15 +2,21 @@
 *.o
 *.d
 *.a
-h3
-h3_*_tests
-h3_*_test
-libh3.a
+# Anchored to engine/: a bare `h3` also matched pipeline/models/h3/, which is
+# the adapter source. Same class of bug as the unanchored `models/` below —
+# both silently kept committed code out of the repository.
+/engine/h3
+/engine/h3_*_tests
+/engine/h3_*_test
+/engine/libh3.a
 .deps/
 build/
 
 # ---- models & weights (multi-GB, never commit) ----
-models/
+# Anchored to the repo root: a bare `models/` would also match
+# pipeline/models/, which holds the adapter source code, not weights.
+# Found the hard way: the H3 adapter was never committed until 2026-10-25.
+/models/
 *.safetensors
 *.bin
 *.gguf

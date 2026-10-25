@@ -48,17 +48,22 @@ class ResumeState:
 
 
 def adopt_stray_outputs(out_dir: Path, shots: list,
-                        on_adopt: Callable[[Path, Path], None] | None = None
-                        ) -> list[Path]:
+                        on_adopt: Callable[[Path, Path], None] | None = None,
+                        pattern: str = "video-*.mp4") -> list[Path]:
     """Map orphaned sequential outputs onto shot names, in request order.
 
     Returns the adopted paths. Only fills a name that does not already exist,
     so re-running resume is itself idempotent.
+
+    ``pattern`` comes from the adapter: only a renderer that assigns its own
+    sequential names can leave strays, and only the adapter knows that scheme.
+    An empty pattern disables adoption, which is correct for a model that
+    writes each output where the script said.
     """
     adopted: list[Path] = []
-    if not out_dir.is_dir():
+    if not pattern or not out_dir.is_dir():
         return adopted
-    strays = sorted(out_dir.glob("video-*.mp4"))
+    strays = sorted(out_dir.glob(pattern))
     for index, stray in enumerate(strays):
         if index >= len(shots):
             break

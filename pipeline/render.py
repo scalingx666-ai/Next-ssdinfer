@@ -23,6 +23,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -32,8 +33,8 @@ REPO = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.session import (Session, build_stream, default_numbered_outputs,  # noqa: E402
-                          map_back)
+from core.session import (Session, build_stream, build_argv_list,  # noqa: E402
+                          default_numbered_outputs, map_back, run_oneshot)
 from core.shots import filter_shots, load_shots  # noqa: E402
 from models.registry import load  # noqa: E402
 
@@ -77,16 +78,16 @@ def main(argv=None) -> int:
 
     # Capacity is checked before anything runs. An over-budget request is
     # refused rather than degraded, because the failure mode is silent: the
-    # renderer exits 0 and writes a playable clip full of noise.
+    # renderer exits 0 and writes a playable clip full of noise, or a model
+    # load that crosses the working set raises somewhere unhelpful later.
     worst = None
     for shot in shots:
         cap = adapter.capacity.check(preset, shot)
-        worst = cap if worst is None or cap.tokens > worst.tokens else worst
+        worst = cap if worst is None or cap.cost > worst.cost else worst
         if not cap.ok:
             print(f"capacity: {shot.id}: {cap.reason}", file=sys.stderr)
             return 1
-    print(f"capacity: {worst.tokens}/{worst.budget} tokens "
-          f"({worst.utilisation:.0%} of the measured budget)"
+    print(f"capacity: {worst.describe()}"
           + (f" — {worst.reason}" if worst.reason else ""))
 
     if args.check_only:
@@ -102,7 +103,8 @@ def main(argv=None) -> int:
         adopted = adopt_stray_outputs(
             out_dir, shots,
             on_adopt=lambda s, t: print(f"resume: adopted {s.name} -> {t.name}",
-                                        flush=True))
+                                        flush=True),
+            pattern=adapter.output_glob)
         state = partition_shots(
             out_dir, shots, adapter.is_complete,
             on_park=lambda p, q: print(f"resume: {p.name} incomplete -> parked "
@@ -113,29 +115,49 @@ def main(argv=None) -> int:
             print("nothing to do")
             return 0
 
-    commands = build_stream(adapter, shots, preset, out_dir)
+    oneshot = adapter.mode == "oneshot"
 
-    if args.dry_run:
-        print("\n".join(commands))
-        return 0
+    if oneshot:
+        # One argv per request. Dry run prints exactly what would be executed,
+        # from the same call, so a dry run cannot drift from the run.
+        try:
+            argvs = build_argv_list(adapter, shots, preset, out_dir)
+        except RuntimeError as exc:
+            print(f"preflight: {exc}", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            print("\n".join(shlex.join(a) for a in argvs))
+            return 0
+    else:
+        commands = build_stream(adapter, shots, preset, out_dir)
+        if args.dry_run:
+            print("\n".join(commands))
+            return 0
 
     log_path = Path(args.log) if args.log else out_dir / "batch.log"
     print(f"batch: {len(shots)} shot(s), preset {preset_name}, model {args.model}")
-    print(f"  shape  {preset.render_w}x{preset.render_h} -> "
-          f"{preset.width}x{preset.height}")
-    print(f"  steps {preset.steps}  layers {preset.layers}  "
-          f"token-reduction {'on' if preset.token_reduction else 'off'}")
+    print(f"  preset {preset.describe()}")
+    print(f"  mode   {adapter.mode}")
+    print(f"  model  {adapter.model_dir}")
     print(f"  out    {out_dir}")
     print(f"  log    {log_path}")
 
-    before = {p.name for p in out_dir.glob("*.mp4")}
+    before = ({p.name for p in out_dir.glob(adapter.output_glob)}
+              if adapter.output_glob else set())
     started = time.time()
-    session = Session(adapter.binary, adapter.extra_args(), adapter.cwd,
-                      log_path)
-    result = session.run("\n".join(commands) + "\n")
+    if oneshot:
+        # When stdout is the artifact, name it before the process starts: that
+        # is what makes resume idempotent without a post-run rename pass.
+        captures = ([out_dir / s.out for s in shots]
+                    if getattr(adapter, "stdout_is_output", False) else None)
+        result = run_oneshot(argvs, adapter.cwd, log_path, captures)
+    else:
+        session = Session(adapter.binary, adapter.extra_args(), adapter.cwd,
+                          log_path)
+        result = session.run("\n".join(commands) + "\n")
     elapsed = result.elapsed
 
-    numbered = default_numbered_outputs(out_dir, before)
+    numbered = default_numbered_outputs(out_dir, before, adapter.output_glob)
     renamed = map_back(out_dir, numbered, shots)
     for shot in shots:
         path = out_dir / shot.out
@@ -143,23 +165,28 @@ def main(argv=None) -> int:
             print(f"  {path.name}  {path.stat().st_size / 1e6:.1f} MB")
 
     ok = sum(1 for s in shots if (out_dir / s.out).exists())
+    unit = "clip(s)" if not oneshot else "response(s)"
     print(f"batch rc={result.returncode} in {elapsed:.0f}s, "
-          f"{ok}/{len(shots)} clips written ({renamed} renamed)")
+          f"{ok}/{len(shots)} {unit} written ({renamed} renamed)")
 
     if args.qc:
-        bad = 0
-        for shot in shots:
-            path = out_dir / shot.out
-            if not path.exists():
-                continue
-            verdict = adapter.judge(path, shot)
-            print(f"qc: {shot.id}: {verdict.label}"
-                  + (f" — {verdict.detail}" if verdict.detail else ""))
-            if not verdict.ok:
-                bad += 1
-        if bad:
-            print(f"qc: {bad} clip(s) failed", file=sys.stderr)
-            return 2
+        if adapter.judge is None:
+            print(f"qc: {adapter.name} has no calibrated quality gate; its "
+                  f"failure modes are visible in the output", file=sys.stderr)
+        else:
+            bad = 0
+            for shot in shots:
+                path = out_dir / shot.out
+                if not path.exists():
+                    continue
+                verdict = adapter.judge(path, shot)
+                print(f"qc: {shot.id}: {verdict.label}"
+                      + (f" — {verdict.detail}" if verdict.detail else ""))
+                if not verdict.ok:
+                    bad += 1
+            if bad:
+                print(f"qc: {bad} clip(s) failed", file=sys.stderr)
+                return 2
     return 0 if ok == len(shots) else 2
 
 

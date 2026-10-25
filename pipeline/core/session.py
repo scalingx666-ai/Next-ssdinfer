@@ -19,10 +19,17 @@ h3_gpu.m reads the shader source from the working directory). It names
 outputs sequentially in request order, so the driver maps them back onto shot
 names afterwards — and must do so even when the process is killed, or a crash
 loses finished work.
+
+**One-shot.** Not every local model has an interactive mode. A CLI LLM takes a
+complete argv per invocation, so there is no stream to build and no resident
+weights to amortise. ``run_oneshot`` is the same contract — N requests in, one
+:class:`SessionResult` out — for that shape, so the driver branches in exactly
+one place instead of every adapter inventing its own loop.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -78,14 +85,21 @@ class Session:
 
 
 def default_numbered_outputs(out_dir: Path,
-                             exclude: set[str]) -> list[Path]:
+                             exclude: set[str],
+                             pattern: str = "video-*.mp4") -> list[Path]:
     """Outputs the renderer created during this run, in request order.
 
     ``exclude`` holds names that already existed before the run, so a
     ``--resume`` invocation does not re-adopt clips it skipped.
+
+    ``pattern`` is supplied by the adapter because the naming scheme belongs to
+    the renderer, not to this module. h3 numbers its clips ``video-NNNN.mp4``;
+    a model that writes each output itself passes ``""`` and gets no renaming
+    at all.
     """
-    return sorted(p for p in out_dir.glob("video-*.mp4")
-                  if p.name not in exclude)
+    if not pattern:
+        return []
+    return sorted(p for p in out_dir.glob(pattern) if p.name not in exclude)
 
 
 def map_back(out_dir: Path, numbered: list[Path], shots: list,
@@ -111,3 +125,58 @@ def map_back(out_dir: Path, numbered: list[Path], shots: list,
         if on_rename:
             on_rename(path, target)
     return renamed
+
+
+def build_argv_list(adapter, shots: list, preset,
+                    out_dir: Path) -> list[list[str]]:
+    """One complete argv per request, in request order.
+
+    Shared by the dry run and the real run deliberately. A dry run that
+    assembles commands by a different path than execution is a dry run that
+    can be wrong, which is worse than having none.
+    """
+    return [
+        [str(part) for part in adapter.shot_argv(shot, index, preset, out_dir)]
+        for index, shot in enumerate(shots)
+    ]
+
+
+def run_oneshot(argvs: list[list[str]], cwd: Path, log_path: Path,
+                stdout_paths: list[Path] | None = None) -> SessionResult:
+    """Run a one-shot-per-request renderer over a prebuilt argv list.
+
+    A one-shot renderer has no resident state, so stopping on the first
+    failure costs nothing and tells you the most: a model that reloads weights
+    per request is not going to succeed on request two if request one failed,
+    and a batch failing systematically should say so immediately rather than
+    forty load cycles later.
+
+    ``stdout_paths`` gives a per-request capture file. When it is ``None``, or
+    an entry is ``None``, stdout joins the run log — correct for a renderer
+    that writes its artifacts itself and uses stdout for progress. When it is
+    given, stdout *is* the artifact: a text model's completion lands there,
+    and naming the file up front is what lets resume work without a rename
+    pass.
+
+    Returns one :class:`SessionResult`, exactly as ``Session.run`` does, so the
+    driver's post-run bookkeeping does not branch on mode.
+    """
+    started = time.time()
+    rc = 0
+    with log_path.open("w") as log:
+        for index, argv in enumerate(argvs):
+            log.write(f"$ {shlex.join(argv)}\n")
+            log.flush()
+            capture = stdout_paths[index] if stdout_paths else None
+            if capture is None:
+                proc = subprocess.run(argv, cwd=str(cwd), stdout=log,
+                                      stderr=subprocess.STDOUT)
+            else:
+                capture.parent.mkdir(parents=True, exist_ok=True)
+                with capture.open("w") as out:
+                    proc = subprocess.run(argv, cwd=str(cwd), stdout=out,
+                                          stderr=log)
+            if proc.returncode != 0:
+                rc = proc.returncode
+                break
+    return SessionResult(rc, time.time() - started, log_path)

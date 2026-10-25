@@ -275,21 +275,36 @@ token-reduction off    ssd-streaming on
 
 ## 附带评估：本机能跑哪个本地 LLM
 
-同一台机器上顺带核实了四个候选模型，结论只有 Flint 可行：
+同一台机器上顺带核实了四个候选模型，结论只有 Flint 可行，且**已经实测跑通**：
 
 | 模型 | 权重体积 | 32 GB 可行性 |
 |---|---|---|
-| **Recursive Flint**（40B-A2.5B） | 17.8 GB（3-bit） | ✅ 可行 |
+| **Recursive Flint**（40B-A2.5B） | 16.61 GiB（3-bit，实测 17,837,530,688 B） | ✅ **已跑通** |
 | Edge0（35B MoE） | ~17 GB | ⚠️ 需额外运行时 |
 | MiniMax M3.1 Flash（428B） | ~150–215 GB | ❌ 差 4 倍 |
 | DeepSeek V4.1 Flash 1017（552B） | ~510 GB | ❌ 差 16 倍 |
+
+**M1 Pro 实测（2026-10-25）**：prefill 82.7 tok/s，**decode 47.7 tok/s**，
+峰值内存 **17.953 GB** —— 对比 21.33 GiB 工作集上限，占用 79%，余 4.6 GiB。
+官方 125 tok/s 是 M4 Pro 的数，不可当本机预期。
+
+Flint 已接入为 `pipeline/models/flint/`（框架第二个 adapter，第一个非视频模型）：
+
+```bash
+cd pipeline
+python3 render.py --script ../shots/flint_smoke.jsonl --model flint \
+  --preset plan --qc
+```
 
 坑点：Flint 官方引擎 `rec` **明确要求 M4 Pro / M5 Pro / M5 Max + 48GB**，`install.sh` 会跑
 `rec doctor` 直接拒绝本机。但 Flint 架构已被 llama.cpp（[PR #30928](https://github.com/ggml-org/llama.cpp/pull/30928)）
 和 mlx-vlm ≥ 0.7.10 原生支持，社区版 3-bit 量化就是为 24/32GB Mac 做的。
 
 注意 GPU 的可用显存不是 32GB，而是 macOS 默认工作集上限
-**≈ 21.3 GB**（`max_recommended_working_set_size`）。详见 [docs/LOCAL-LLM-EVALUATION.md](docs/LOCAL-LLM-EVALUATION.md)。
+**≈ 21.3 GB**（`max_recommended_working_set_size`）。
+另一个必踩的坑：Flint **关不掉思考**（`--thinking-mode disabled` 无效），
+`max_tokens` 给小了会产出纯思考、正文为空、返回码 0 的文件。
+详见 [docs/LOCAL-LLM-EVALUATION.md](docs/LOCAL-LLM-EVALUATION.md)。
 
 ---
 
