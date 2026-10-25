@@ -66,7 +66,13 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
 
-    adapter = load(args.model, REPO)
+    try:
+        adapter = load(args.model, REPO)
+    except KeyError as exc:
+        # The module docstring promises exit 1 for an unknown adapter; a
+        # traceback satisfies neither the contract nor the person typing.
+        print(f"render.py: {exc.args[0]}", file=sys.stderr)
+        return 1
     preset_name = args.preset or next(iter(adapter.presets))
     if preset_name not in adapter.presets:
         print(f"unknown preset {preset_name!r}. available: "
