@@ -275,7 +275,56 @@ print(r.choices[0].message.content, r.choices[0].finish_reason)
 17.9157 GB，与 CLI 的 17.953 GB 一致。流式 `stream=True` 可用，
 `finish_reason` 与 `usage` 计数精确，客户端能真正校验完成。
 
-### 慢的原因：前缀缓存默认是关的
+### decode 为什么慢：MoE kernel，不是带宽
+
+先量这台机器的真实可达带宽：MLX 对 3 GiB fp32 求和，实测 **165.2 GB/s**
+（M1 Pro 官方规格 200 GB/s）。
+
+再算每 token 的访存（专家权重按真实 shape，`[256, 512, 192]` U32 packed，
+而不是按 4-bit 全量估）：
+
+| 组成 | 每 token |
+|---|---|
+| attention（49 层，q 4-bit / kv 8-bit / o 4-bit） | 490 MiB |
+| embed + lm_head（vocab 150144 × 2048，8-bit，未 tie） | 587 MiB |
+| shared expert（49 × 3.0 MiB，无条件） | 147 MiB |
+| router | 12 MiB |
+| MoE 激活专家（6/256，3-bit） | 110 MiB |
+| **合计** | **1.35 GiB** |
+
+按 165 GB/s 推算上限 **123 tok/s**，而实测 50.7 tok/s——**只用上 41% 的带宽**。
+所以慢不在带宽，在 kernel。
+
+逐层 profile 证实了这一点（`/tmp/prof2.py`，1 token decode）：
+
+```
+full decode:    28.83 ms/token -> 35 tok/s
+MoE block:       0.50 ms -> x49 = 24.6 ms  (85% of decode)
+lm_head:         1.98 ms  (7%)
+```
+
+**MoE 吃掉 85% 的时间**。而它的访存只占 8%，说明 MLX 的 `gather_mm`
+在这个 shape（256 专家 / 3-bit / in 2048）上是**调度受限而非带宽受限**。
+决定性证据是缩放行为：
+
+| 选中专家数 | SwitchGLU 耗时 |
+|---|---|
+| 1 | 1.853 ms |
+| 2 | 1.704 ms |
+| 6 | 1.930 ms |
+| 16 | 1.929 ms |
+| 64 | 2.532 ms |
+| 256 | 4.614 ms |
+
+**top-1 和 top-6 几乎一样快**。带宽受限的 kernel 应该按选中专家数线性增长；
+实际只涨 4%，说明它读了整个 stacked tensor 或走了低效分发路径。
+
+对照 llama.cpp 的 Metal 后端：`MUL_MAT_ID` 有专用的 `kernel_mul_mm_id_map0`，
+按 (expert, token) 对生成 tile 描述符、只发射实际需要的 tile
+（`ggml_metal_op_mul_mat_id_extra_tpe` / `_extra_ids` 就是为它准备的），
+这正是 MoE decode 该走的路径。
+
+### 慢的另一半原因：前缀缓存默认是关的
 
 日志里 29,390 token 的 Agent 上下文 prefill 108.2s、首字 108.8s，`cached_tokens=0`
 ——每轮都在重算整个 system prompt。根因是 **mlx-vlm 的 `APC_ENABLED` 默认 `"0"`**，
