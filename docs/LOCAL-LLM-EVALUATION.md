@@ -348,11 +348,23 @@ M1 Pro 的 `max_recommended_working_set_size` 是 **22906503168 B = 21.33 GiB**�
 |---|---|---|---|
 | RecursiveSI Q4_1 | 24.2 GiB | **-2.87 GiB** | 否，装不进 |
 | unsloth UD-Q4_K_XL | 23.33 GiB | -2.00 GiB | 否 |
-| **unsloth UD-Q3_K_XL** | **17.22 GiB** | **+4.11 GiB** | **是**（KV 3.06 GiB） |
+| unsloth UD-Q3_K_XL | 17.22 GiB | +4.11 GiB | 是（KV 1.77 GiB） |
 | unsloth UD-IQ2_XXS | 11.04 GiB | +10.29 GiB | 是（262K 全开） |
 
-KV 每 token = 49 层 × 2(K,V) × 4 KV 头 × 128 head_dim × 0.5 B（8-bit KV）
-= **24.50 KiB/token**，llama.cpp 按 `-c` 全量预分配。
+KV 每 token 每层 = 2(K,V) × 4 KV 头 × 128 head_dim × 1 B（8-bit KV）
+= **1.00 KiB/layer/token**。又因 49 层里有 35 层是 sliding（window 513），
+llama.cpp 默认 `--swa-full` 关闭、对这些层用环形缓冲，只保留窗口内，
+所以实际 KV 比 `n_ctx × 49 层` 的保守估算小约 71%：
+
+| 上下文 | 保守估算 | 实际（SWA 生效） |
+|---|---|---|
+| 8K | 392 MiB | 130 MiB |
+| 32K | 1.53 GiB | 466 MiB |
+| 128K | 6.11 GiB | 1.77 GiB |
+| 262K | 12.24 GiB | 3.52 GiB |
+
+按 SWA 生效算，UD-Q3_K_XL + **原生满窗 262,144** 也只要 20.74 GiB
+（余 0.59 GiB）——比 mlx-vlm 当前受困的 128K 还多一倍可用上下文。
 
 Recursive Q4_1 超出上限 2.87 GiB，只能用 `--cpu-moe` 把 MoE 专家放 CPU——
 那正好是占 85% 时间的部分，等于把最热的代码挪到最冷的设备。
