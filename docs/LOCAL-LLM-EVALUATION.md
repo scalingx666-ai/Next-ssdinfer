@@ -275,6 +275,24 @@ print(r.choices[0].message.content, r.choices[0].finish_reason)
 17.9157 GB，与 CLI 的 17.953 GB 一致。流式 `stream=True` 可用，
 `finish_reason` 与 `usage` 计数精确，客户端能真正校验完成。
 
+### 慢的原因：前缀缓存默认是关的
+
+日志里 29,390 token 的 Agent 上下文 prefill 108.2s、首字 108.8s，`cached_tokens=0`
+——每轮都在重算整个 system prompt。根因是 **mlx-vlm 的 `APC_ENABLED` 默认 `"0"`**，
+自动前缀缓存不开。打开后同一前缀二轮实测：
+
+| | prompt tokens | prefill | 首字 | 总耗时 |
+|---|---|---|---|---|
+| 关 APC | 12,389 | 37.95s（326.5 tok/s） | 41.0s | 42.88s |
+| 开 APC | 12,389（cached 12,388） | **0.15s**（82,623 tok/s） | 0.45s | **2.38s** |
+
+**18.1×**。所以 agent 类客户端必须确认前缀缓存是开的——
+`serve_flint.sh` 已默认 `APC_ENABLED=1`（关掉对照：`APC_ENABLED=0 ./serve_flint.sh restart`）。
+内存块池默认 2048×16 = 32K token，超出部分落磁盘层
+（`~/.cache/mlx-vlm/apc`，默认上限 20GB）——**这才是 SSD 在生成阶段真正吃到优势的地方**：
+读回 KV 远比重算便宜，且权重仍整体常驻（实测进程 phys_footprint 19GB），
+不存在每 token 从盘上读权重那种会瞬间被 I/O 拖死的路径。
+
 ### 两个必踩的坑
 
 - **`model` 必须是长绝对路径**。写 `"flint"` 之类别名会 400——服务端把未知名字
@@ -363,6 +381,8 @@ Peak memory: 17.953 GB
    得到一份纯思考、正文为空、**返回码 0** 的输出。
 5. **满上下文装不下**：262144 上下文峰值 21.53 GiB，超过 21.33 GiB 工作集。
    实用上限约 131K（19.78 GiB）。
+6. **`APC_ENABLED` 默认关闭**（mlx-vlm 上游默认值）：不开的话每个请求都全量
+   prefill，长 system prompt 首字延迟按分钟计。`serve_flint.sh` 已默认打开。
 6. **tool call 参数名错误**：mlx-vlm 0.7.10 已知问题，作者测得 OpenCode 测试中
    85 次调用有 41 次参数名错误（如 `path` 而非 `filePath`），但任务最终仍全部通过。
    修复在 [mlx-vlm#2571](https://github.com/Blaizzy/mlx-vlm/pull/2571)。
