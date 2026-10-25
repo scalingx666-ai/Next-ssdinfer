@@ -319,6 +319,21 @@ lm_head:         1.98 ms  (7%)
 **top-1 和 top-6 几乎一样快**。带宽受限的 kernel 应该按选中专家数线性增长；
 实际只涨 4%，说明它读了整个 stacked tensor 或走了低效分发路径。
 
+Batch 曲线证实了"固定开销"这个判断（同一 MoE block，x49 层折算）：
+
+| batch | ms/token | 49 层合计 | 聚合吞吐 |
+|---|---|---|---|
+| 1 | 1.508 | 73.9 ms | 14 tok/s |
+| 2 | 0.702 | 34.4 ms | 58 tok/s |
+| 4 | 0.393 | 19.3 ms | 208 tok/s |
+| 8 | 0.239 | 11.7 ms | 683 tok/s |
+| 16 | 0.146 | 7.2 ms | 2229 tok/s |
+
+batch 从 1 到 32，kernel 总时间只从 1.5 ms 涨到 3.4 ms。
+**单请求慢是因为付了全额固定开销；并发请求能摊薄它。**
+服务端默认 continuous batching（`--max-num-seqs` 无上限），
+所以这一点对多客户端已经生效，对单请求无能为力。
+
 对照 llama.cpp 的 Metal 后端：`MUL_MAT_ID` 有专用的 `kernel_mul_mm_id_map0`，
 按 (expert, token) 对生成 tile 描述符、只发射实际需要的 tile
 （`ggml_metal_op_mul_mat_id_extra_tpe` / `_extra_ids` 就是为它准备的），
