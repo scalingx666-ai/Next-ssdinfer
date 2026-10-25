@@ -485,6 +485,50 @@ Peak memory: 17.953 GB
 
 ---
 
+## 引擎对比：llama.cpp 不快，结论是不换
+
+用 unsloth 的 `flint-UD-Q3_K_XL.gguf`（17.22 GiB）在上游 llama.cpp master
+（`b3fa699`，Metal）实测，同一 prompt、同一生成长度，与 mlx-vlm 对照：
+
+| 项目 | mlx-vlm（flint-mixed-3-4bit，21 GiB） | llama.cpp（UD-Q3_K_XL，17.22 GiB） |
+|---|---|---|
+| decode | **48.7 tok/s**（三次稳定） | **43.4 tok/s**（三次稳定，40.3–43.5） |
+| prompt / prefill | 126.2 tok/s | 50–118 tok/s |
+| 峰值内存 | 17.95 GB | 未测（权重小 3.8 GiB，应更低） |
+| 最大可用上下文 | 128K（已验证） | **96K**；128K 直接 OOM |
+| OpenAI 兼容 | 自研 `serve.py` | 原生 `llama-server` |
+
+**llama.cpp 慢约 11%，上下文上限还更低，所以不换引擎。**
+
+两点必须说清楚，否则这个数字会被误读：
+
+**一、这不是纯粹的引擎对比。** 两边量化方案不同——mlx-vlm 是 3/4-bit 混合，
+llama.cpp 侧是统一的 Q3_K。把 11% 全归给引擎不公平。公平结论是：
+"换引擎 + 换量化"这个组合没有更快。
+
+**二、慢的原因不是 kernel 差。** 按每 token 1.35 GiB 访存折算，
+llama.cpp 的有效带宽约 33.4 GB/s，反而比 mlx-vlm 的 29.8 GB/s **更高**。
+两者都只用到 165.2 GB/s 可达带宽的约 20%，**都是调度受限，不是带宽受限**。
+llama.cpp 慢更可能来自 Q3_K 的块结构（256 元素/块）在 MoE gather 路径上
+比 MLX 的 U32 packed 3-bit 更吃亏。
+
+llama.cpp 侧真正可用的部分是它原生就是 OpenAI 兼容服务（`--api-key-file`、
+`--cont-batching`、`reasoning_format` 都现成），而 mlx 侧需要自研 `serve.py`。
+这是工程便利，不是性能优势。切换脚本 `serve_flint_lcpp.sh` 已备好但**未采用**。
+
+OOM 的边界实测得很清楚（`-ngl 99` 全层 offload）：
+
+| `-c` | 结果 |
+|---|---|
+| 4096 / 16384 / 32768 / 65536 / 98304 | 正常，43.4–43.5 tok/s |
+| 131072 / 262144 | `Insufficient Memory`，生成失败（Prompt 0.0 t/s） |
+
+llama.cpp 的 `common_fit_params` 会自动收缩参数适配显存，96K 以内有效，
+128K 起收缩不了。另外线程数影响很小：`-t 4` 42.5、`-t 8` 42.4、`-t 10` 40.3 tok/s，
+10 线程反而略慢。
+
+---
+
 ## 已知风险
 
 1. ~~M1 Pro 无 Metal 4 会不兼容~~ —— **已证伪**：跑通了，decode 47.7 tok/s。没有 megakernel 相关的报错。
@@ -493,7 +537,8 @@ Peak memory: 17.953 GB
 4. **思考链吃预算**（仍然有效）：默认就要 1500 token 起步，`max_tokens` 给小了会
    得到一份纯思考、正文为空、**返回码 0** 的输出。
 5. **满上下文装不下**：262144 上下文峰值 21.53 GiB，超过 21.33 GiB 工作集。
-   实用上限约 131K（19.78 GiB）。
+   实用上限约 131K（19.78 GiB）。llama.cpp 侧同模型 Q3_K 量化更是只到 96K，
+   128K 直接 `Insufficient Memory`——见下方引擎对比。
 6. **`APC_ENABLED` 默认关闭**（mlx-vlm 上游默认值）：不开的话每个请求都全量
    prefill，长 system prompt 首字延迟按分钟计。`serve_flint.sh` 已默认打开。
 6. **tool call 参数名错误**：mlx-vlm 0.7.10 已知问题，作者测得 OpenCode 测试中
@@ -512,6 +557,8 @@ Peak memory: 17.953 GB
 - `rec` 引擎：https://github.com/recursive-oss/rec
 - llama.cpp 支持 PR：https://github.com/ggml-org/llama.cpp/pull/30928
 - 社区 24/32GB 量化版：https://huggingface.co/mlx-community/flint-mixed-3-4bit
+- unsloth Flint GGUF（本次引擎对比用）：https://huggingface.co/unsloth/flint-GGUF
+- unsloth Flint 文档：https://unsloth.ai/docs/models/flint.md
 - Edge0：https://github.com/Edge0-AI/Edge0 ，arXiv https://arxiv.org/abs/2609.18063
 - MiniMax M3.1 Flash GGUF：https://huggingface.co/unsloth/MiniMax-M3.1-Flash-GGUF
 - DeepSeek V4.1 Flash 1017：https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017
