@@ -339,6 +339,43 @@ batch 从 1 到 32，kernel 总时间只从 1.5 ms 涨到 3.4 ms。
 （`ggml_metal_op_mul_mat_id_extra_tpe` / `_extra_ids` 就是为它准备的），
 这正是 MoE decode 该走的路径。
 
+### 换引擎的容量账：为什么选 unsloth UD-Q3_K_XL
+
+M1 Pro 的 `max_recommended_working_set_size` 是 **22906503168 B = 21.33 GiB**，
+不是统一内存的 32 GB。任何方案都必须塞进这个数：
+
+| 权重 | 大小 | 扣权重后余量 | 128K 上下文可行？ |
+|---|---|---|---|
+| RecursiveSI Q4_1 | 24.2 GiB | **-2.87 GiB** | 否，装不进 |
+| unsloth UD-Q4_K_XL | 23.33 GiB | -2.00 GiB | 否 |
+| **unsloth UD-Q3_K_XL** | **17.22 GiB** | **+4.11 GiB** | **是**（KV 3.06 GiB） |
+| unsloth UD-IQ2_XXS | 11.04 GiB | +10.29 GiB | 是（262K 全开） |
+
+KV 每 token = 49 层 × 2(K,V) × 4 KV 头 × 128 head_dim × 0.5 B（8-bit KV）
+= **24.50 KiB/token**，llama.cpp 按 `-c` 全量预分配。
+
+Recursive Q4_1 超出上限 2.87 GiB，只能用 `--cpu-moe` 把 MoE 专家放 CPU——
+那正好是占 85% 时间的部分，等于把最热的代码挪到最冷的设备。
+所以选 UD-Q3_K_XL：整模进 GPU，余 4.11 GiB 给 KV，且 UD 动态量化质量优于同尺寸 Q4。
+
+**unsloth 的 GGUF 能用上游 llama.cpp 加载**（这里更正一个常见误解）。
+unsloth 的 `iq1-narrow` 分支确实没有 Flint，但它另有 `model-arch/flint` 分支
+（`08f367a2`），其中 `src/models/flint.cpp` 与上游 master **逐字节相同**，
+`LLM_ARCH_FLINT` 注册齐全。它相对上游只多一个 vocab 提交，把
+`LLAMA_VOCAB_PRE_TYPE_FLINT` 从 62 改成 63；而该枚举值不写进 GGUF，
+加载时从 `tokenizer.ggml.pre = "flint"` 字符串解析，因此上游加载无碍。
+
+实测确认 unsloth UD-Q3_K_XL 的 metadata 与本地 safetensors 架构完全一致：
+`block_count=49`、`embedding_length=2048`、`expert_count=256`、
+`expert_used_count=6`、`head_count=32`、`head_count_kv=4`、
+`key/value_length=128`、`sliding_window=513`、`leading_dense_block_count=2`、
+`expert_shared_count=2`、`context_length=262144`。
+
+HF 的 Xet 后端对单连接限速到 10–48 KB/s（重定向到
+`us.aws.cdn.hf.co/xet-bridge-us`），此时必须分段并行下载。
+32 段并行实测约 187 MB/s，比单连接快三个数量级；
+`hf-mirror.com` 在该文件上直接连接超时，不要用。
+
 ### 慢的另一半原因：前缀缓存默认是关的
 
 日志里 29,390 token 的 Agent 上下文 prefill 108.2s、首字 108.8s，`cached_tokens=0`
